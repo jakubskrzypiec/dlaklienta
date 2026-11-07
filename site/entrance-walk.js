@@ -1,4 +1,5 @@
 import { FRAME_COUNT, HOLD_RATIO, CROP_BOTTOM, frameAtProgress, advanceFrame } from './entrance-walk-motion.mjs?v=4';
+import { chooseBufferedFrame, frameStepBudget } from './frame-stability.mjs?v=1';
 
 const intro = document.querySelector('.walk-intro');
 if (intro) initWalk();
@@ -71,7 +72,7 @@ function initWalk() {
       for (const index of frames.keys()) {
         if (index === drawn || index === 0 || index === FRAME_COUNT - 1) continue;
         // Preserve both ends of the journey while scrubbing a long distance.
-        const d = Math.min(Math.abs(index - current), Math.abs(index - target));
+        const d = Math.min(Math.abs(index - current), Math.abs(index - target), Math.abs(index - drawn));
         if (d > distance) { farthest = index; distance = d; }
       }
       if (farthest < 0) break;
@@ -159,45 +160,34 @@ function initWalk() {
   function fillWindow() {
     if (!prepared || disabled || !active || document.hidden) return;
     const centre = Math.round(current), seek = Math.round(target);
-    const direction = target < current ? -1 : 1;
+    const anchor = drawn >= 0 ? drawn : centre;
+    const direction = Math.sign(centre - anchor) || Math.sign(seek - anchor) || 1;
+    // Load where the user actually sees the camera, not just the distant target.
+    const anchorPack = Math.floor(anchor / manifest.packSize);
     const centrePack = Math.floor(centre / manifest.packSize);
     const targetPack = Math.floor(seek / manifest.packSize);
-    // Load the two required regions first; speculative downloads must not block them.
+    if (!packs.has(anchorPack)) loadPack(anchorPack);
+    const advancePack = Math.floor((anchor + direction * 24) / manifest.packSize);
+    if (advancePack >= 0 && advancePack < manifest.packs.length && !packs.has(advancePack)) loadPack(advancePack);
     if (!packs.has(centrePack)) loadPack(centrePack);
-    if (targetPack !== centrePack && !packs.has(targetPack)) loadPack(targetPack);
+    if (!packs.has(targetPack)) loadPack(targetPack);
 
-    const needed = [centre, seek];
-    for (let offset = 1; offset <= 20; offset++) {
-      needed.push(centre + offset * direction);
-      if (offset <= 7) needed.push(centre - offset * direction);
-      if (offset <= 7) needed.push(seek + offset * direction, seek - offset * direction);
-    }
+    const needed = [anchor];
+    for (let offset = 1; offset <= 14; offset++) needed.push(anchor + offset * direction);
+    for (let offset = 1; offset <= 3; offset++) needed.push(anchor - offset * direction);
+    needed.push(centre, seek);
+    for (let offset = 1; offset <= 4; offset++) needed.push(centre + offset * direction, seek - offset * direction);
     for (const index of new Set(needed.filter(i => i >= 0 && i < FRAME_COUNT))) {
       if (decoding.size >= (portrait ? 2 : 3)) break;
       if (frames.has(index) || decoding.has(index) ||
           (failures.get(index) || 0) > performance.now()) continue;
       const packIndex = Math.floor(index / manifest.packSize);
       if (!packs.has(packIndex)) {
-        if (pendingPacks.size < 2) loadPack(packIndex);
+        if (pendingPacks.size < 3) loadPack(packIndex);
         continue;
       }
       decode(index);
     }
-    // One pack ahead gives the browser time to fetch before the camera arrives.
-    if (pendingPacks.size < 2) {
-      const ahead = Math.floor((centre + direction * 48) / manifest.packSize);
-      if (ahead >= 0 && ahead < manifest.packs.length && !packs.has(ahead)) loadPack(ahead);
-    }
-  }
-
-  function nearestFrame(index, radius = 5) {
-    if (frames.has(index)) return index;
-    let closest = -1, distance = radius + 1;
-    for (const frame of frames.keys()) {
-      const diff = Math.abs(index - frame);
-      if (diff < distance) { distance = diff; closest = frame; }
-    }
-    return closest;
   }
 
   function tick(now) {
@@ -205,8 +195,7 @@ function initWalk() {
     if (disabled || !prepared || !active || document.hidden) return;
     const dt = previous ? (now - previous) / 1000 : 1 / 60;
     previous = now;
-    const seek = Math.round(target);
-    const jumping = Math.abs(target - current) > 55 && frames.has(seek);
+    // Never snap to a far-away decoded frame. Keep the original motion model.
     let next;
     if (settle) {
       // Cubic Hermite ease: keep the current frame and travelling speed
@@ -224,17 +213,18 @@ function initWalk() {
       next = { position, velocity: u < 1 ? (position - current) / Math.max(dt, 1 / 120) : 0 };
       if (u >= 1) settle = null;
     } else {
-      next = jumping ? { position: target, velocity: 0 } : advanceFrame(current, velocity, target, dt);
+      next = advanceFrame(current, velocity, target, dt);
     }
     // Advance the playhead even if the exact frame is still decoding.
     current = next.position;
     velocity = next.velocity;
-    const index = nearestFrame(Math.round(current), 6);
+    const index = chooseBufferedFrame(frames, drawn, current, frameStepBudget(dt));
     if (index >= 0 && index !== drawn) draw(index);
     fillWindow();
     const atEnd = target === FRAME_COUNT - 1 && (drawn === FRAME_COUNT - 1 || scrollY >= start + range - 1);
     setPhase(atEnd ? 'hero' : Math.max(drawn, target) <= 6 ? 'opening' : 'travel');
-    if (Math.abs(current - target) > .015) schedule();
+    if (settle || Math.abs(current - target) > .015 ||
+        chooseBufferedFrame(frames, drawn, current, frameStepBudget(dt)) >= 0) schedule();
     else previous = 0;
   }
 
@@ -249,7 +239,7 @@ function initWalk() {
     if (Math.abs(target - current) > .015) {
       settle = {
         start: performance.now(),
-        duration: 200,
+        duration: Math.max(200, Math.min(1300, Math.abs(target - current) * 11)),
         from: current,
         to: target,
         velocity
@@ -266,14 +256,14 @@ function initWalk() {
     active = rect.bottom > 0 && rect.top < innerHeight;
     document.body.classList.toggle('walk-active', active && !disabled);
     document.body.style.setProperty('--walk-header-y', `${Math.min(0, range - (scrollY - start))}px`);
-    if (prepared && progress >= 1) {
-      target = FRAME_COUNT - 1;
-      if (frames.has(target)) {
-        current = target; velocity = 0; draw(target);
-      } else {
-        poster.src = `${base}hero-final-crop.webp`;
-        stage.classList.remove('has-frame');
-      }
+    // Keep the last two screen-heights as a smooth final-frame hold.
+    // Only force the poster after the entire stage is already offscreen.
+    if (prepared && progress >= 1 && !active) {
+      current = target;
+      velocity = 0;
+      settle = null;
+      if (frames.has(FRAME_COUNT - 1)) draw(FRAME_COUNT - 1);
+      else { poster.src = `${base}hero-final-crop.webp`; stage.classList.remove('has-frame'); }
       setPhase('hero');
     }
     if (active) {
