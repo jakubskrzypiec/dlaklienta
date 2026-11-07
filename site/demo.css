@@ -1,0 +1,16 @@
+/* Isolated 3D walkthrough + ending hero; no other Dobry Układ sections. */
+html,body{min-height:100%;overflow-x:clip}
+body{background:#171511;color:#fff}
+.header{display:none!important}
+.walk-intro{background:#171511}
+.walk-stage .hero-left{z-index:3}
+.walk-stage .walk-hero-actions{display:none!important}
+.walk-stage .hero-statement{max-width:490px}
+.walk-stage.hero.hero-v3::after{pointer-events:none}
+.walk-intro.walk-static.walk-loading{height:1000svh}
+.walk-intro.walk-static.walk-loading .walk-stage.hero.hero-v3{position:sticky}
+@media (max-width:760px){.walk-stage .hero-left{bottom:8%}}
+@media(prefers-reduced-motion:reduce){
+.walk-intro.walk-static.walk-loading{height:100svh}
+.walk-intro.walk-static.walk-loading .walk-stage.hero.hero-v3{position:relative}
+}

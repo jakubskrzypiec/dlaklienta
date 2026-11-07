@@ -1,0 +1,43 @@
+name: Publish 3D walkthrough demo
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate isolated 3D walkthrough
+        run: |
+          node --check site/entrance-walk.js
+          node --check site/entrance-walk-motion.mjs
+          python3 - <<'PY'
+          from pathlib import Path
+          html=Path("site/index.html").read_text()
+          js=Path("site/entrance-walk.js").read_text()
+          for token in ['walk-intro walk-static','walk-canvas','walk-start','walk-skip','hero-left','walk-hero-actions']:
+              assert token in html
+          assert 'home-about' not in html and 'home-portfolio' not in html and '<video' not in html
+          assert 'raw.githubusercontent.com/jakubskrzypiec/dobryuklad' in js
+          assert 'function settleScroll()' in js
+          print("PASS: original scroll player and ending hero without remaining homepage")
+          PY
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v5
